@@ -1,12 +1,10 @@
-import pdfplumber
-import re
+import pdfplumber, re
 from collections import defaultdict
 
-# Look for these phrases (case‐insensitive) to tag pages
 STATEMENT_PATTERNS = {
     "Income Statement": re.compile(r"Consolidated\s+Statements? of (Operations|Income)", re.I),
-    "Balance Sheet":   re.compile(r"Consolidated\s+Balance Sheets?", re.I),
-    "Cash Flows":      re.compile(r"Consolidated\s+Statements? of Cash Flows", re.I),
+    "Balance Sheet":    re.compile(r"Consolidated\s+Balance Sheets?", re.I),
+    "Cash Flows":       re.compile(r"Consolidated\s+Statements? of Cash Flows", re.I),
 }
 
 def detect_pages(pdf_path):
