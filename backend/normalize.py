@@ -14,10 +14,20 @@ def _to_number(x):
     except:
         return None
 
-def _clean_text(s):  # normalize spacing/case for matching
+def _clean_text(s):
     return re.sub(r"\s+", " ", str(s)).strip().lower()
 
-# Canonical maps (extend these over time)
+def _mostly_numeric(series: pd.Series) -> float:
+    """Return fraction of cells that look numeric."""
+    vals = series.dropna().astype(str)
+    if len(vals) == 0: return 0.0
+    ok = 0
+    for v in vals:
+        if _to_number(v) is not None:
+            ok += 1
+    return ok / len(vals)
+
+# Canonical maps (extend over time)
 INCOME_MAP = {
     "total revenues": "revenue", "sales and revenue": "revenue", "net sales": "revenue", "revenue": "revenue",
     "cost of sales": "cogs", "cost of goods sold": "cogs",
@@ -27,7 +37,7 @@ INCOME_MAP = {
     "operating income": "operating_income",
     "interest expense": "interest_expense",
     "provision for income taxes": "income_tax_expense", "income tax": "income_tax_expense",
-    "net income": "net_income", "net income/(loss)": "net_income",
+    "net income/(loss)": "net_income", "net income": "net_income",
 }
 BALANCE_MAP = {
     "cash and cash equivalents": "cash",
@@ -51,40 +61,62 @@ CASHFLOWS_MAP = {
 
 def _canonical_name(raw, stype):
     r = _clean_text(raw)
-    maps = {
-        "Income Statement": INCOME_MAP,
-        "Balance Sheet": BALANCE_MAP,
-        "Cash Flows": CASHFLOWS_MAP
-    }.get(stype, {})
-    # longest key first -> best match
+    maps = {"Income Statement": INCOME_MAP, "Balance Sheet": BALANCE_MAP, "Cash Flows": CASHFLOWS_MAP}.get(stype, {})
     for k, v in sorted(maps.items(), key=lambda kv: len(kv[0]), reverse=True):
         if k in r:
             return v
-    return r  # fallback to cleaned original
+    return r
+
+def _pick_label_and_values(df: pd.DataFrame):
+    cols = list(df.columns)
+    if len(cols) == 0:
+        return None, []
+
+    # score columns
+    year_re = re.compile(r"(19|20)\d{2}")
+    scores = []
+    for i, c in enumerate(cols):
+        header = str(c)
+        yr = bool(year_re.search(header))
+        ratio = _mostly_numeric(df[c])
+        scores.append({"idx": i, "col": c, "year_flag": yr, "num_ratio": ratio})
+
+    # label = column with LOWEST numeric ratio (i.e., mostly text). Prefer no-year columns.
+    label_candidates = sorted(scores, key=lambda s: (s["num_ratio"], s["year_flag"], s["idx"]))
+    label_col = label_candidates[0]["col"]
+
+    # values = columns that look like years OR mostly numeric, keep original order
+    value_cols = [s["col"] for s in scores if s["col"] != label_col and (s["year_flag"] or s["num_ratio"] >= 0.5)]
+
+    # fallback: if we still didn't get value cols, just take the rightmost up to 3 (excluding label)
+    if not value_cols:
+        value_cols = [c for c in cols if c != label_col][-3:]
+
+    # cap at 3 for consistency
+    value_cols = value_cols[-3:]
+    return label_col, value_cols
 
 def normalize_statement(df: pd.DataFrame, stype: str) -> pd.DataFrame:
-    """
-    Input: raw Camelot df (already has headers in df.columns).
-    Output: tidy frame with ['line_item','col1','col2','col3'] and numeric values.
-    """
-    cols = list(df.columns)
+    """Return tidy frame with ['line_item','col1','col2','col3'] and numeric values."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["line_item","col1","col2","col3"])
 
-    # choose 3 rightmost "value" columns (usually years). If fewer exist, take last columns.
-    value_cols = [c for c in cols if any(ch.isdigit() for ch in str(c))][-3:] or cols[-3:]
-    label_col = [c for c in cols if c not in value_cols][0]
+    label_col, value_cols = _pick_label_and_values(df)
 
-    out = df[[label_col] + value_cols].copy()
-    out.columns = ["line_item", "col1", "col2", "col3"][:len(out.columns)]
+    keep = [label_col] + value_cols
+    out = df[keep].copy()
 
-    # clean labels + numbers
+    # rename to standard column names
+    new_cols = ["line_item"] + [f"col{i+1}" for i in range(len(value_cols))]
+    out.columns = new_cols
+
+    # clean labels & numbers
     out["line_item"] = out["line_item"].map(lambda s: _canonical_name(s, stype))
-    for c in ["col1","col2","col3"]:
-        if c in out.columns:
-            out[c] = out[c].map(_to_number)
+    for c in new_cols[1:]:
+        out[c] = out[c].map(_to_number)
 
-    # drop rows with no numeric data
-    if {"col1","col2","col3"} & set(out.columns):
-        keep_cols = [c for c in ["col1","col2","col3"] if c in out.columns]
-        out = out.dropna(how="all", subset=keep_cols)
+    # drop rows with no numeric data in the value cols
+    if len(new_cols) > 1:
+        out = out.dropna(how="all", subset=new_cols[1:])
 
     return out.reset_index(drop=True)
